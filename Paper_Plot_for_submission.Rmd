@@ -1,0 +1,1107 @@
+---
+title: "CONN_LMM_PLOT"
+output: html_document
+date: "2025-07-01"
+---
+
+```{r setup, include=FALSE}
+# knitr::opts_chunk$set(echo = TRUE)
+
+# Load Libraries
+library(dplyr) 
+library(ggplot2)
+# library(devtools)
+# library(ggpmisc)
+library(lme4)
+#library(optimx)
+library(nlme)
+#library(growthcurver)
+library(tidyr)
+library(viridis)
+library(RColorBrewer)
+library(forcats)
+
+```
+
+```{r Organize the data into long format}
+# set the directory
+setwd("/Users/quanz/Documents/UM/Projects/Connectivity/LMM")
+
+
+# file <- "CONN_LMM_2025.csv"
+# file <- "CONN_Mastersheet_OAs.csv"
+# June 25 updated
+file <- "CONN_Mastersheet_2025_7.9.csv"
+CONN_LMM <- read.csv(file)
+
+
+CONN_LMM_long <- CONN_LMM %>%
+  pivot_longer(
+    cols = -c(Type, ID, SubNum, Age, between_age, Btwn_cAge, With_cAge), 
+    names_to = c("ROI", "measure"), 
+    names_sep = "_"
+  ) %>%
+  pivot_wider(
+    names_from = measure,
+    values_from = value
+  ) %>%
+  arrange(ROI)
+
+CONN_LMM_long_old_combined <- CONN_LMM_long %>%
+  filter(Type %in% c("W1", "W2"))
+```
+
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r making the CONN_LMM_long_combined dataset for plot}
+CONN_LMM_long_old <- CONN_LMM_long %>%
+  filter(Type != "Young")
+
+within_avg <- CONN_LMM_long_old %>%
+  group_by(SubNum, Age) %>%  # Group by Subject and Age
+  summarize(within = mean(within, na.rm = TRUE), .groups = "drop") %>%
+  mutate(ROI = "Overall Mean")  # Assign a label for overall mean
+
+within_avg <- within_avg %>%
+  left_join(
+    CONN_LMM_long_old %>% 
+      filter(ROI == "DMN") %>% 
+      select(SubNum, Type, ID, between_age, Btwn_cAge, With_cAge),
+    by = "SubNum"
+  ) %>%
+  mutate(ROI = "Overall Mean")  # Keep "Overall Mean" as a label
+
+CONN_LMM_long_old_combined <- bind_rows(CONN_LMM_long_old, within_avg)
+
+roi_order <- c("DMN", "SMN", "SAL", "DAN", "FP", "LAN", "VIS", "CRB", "Overall Mean")
+
+CONN_LMM_long_old_combined <- CONN_LMM_long_old_combined %>%
+  filter(ROI %in% roi_order)
+
+CONN_LMM_long_old_combined$ROI <- factor(CONN_LMM_long_old_combined$ROI, levels = roi_order)
+```
+
+
+```{r Model 2 - within-network connectivity longitudinal}
+# ```{r fit the lme for each network for the plots}
+# List of unique ROIs (networks)
+roi_list <- c("DMN", "SMN", "SAL", "DAN", "FP", "LAN", "VIS", "CRB")
+
+# Initialize an empty list to store model results
+network_fits <- list()
+
+# Loop through each network and fit a separate LME model
+for (roi in roi_list) {
+  
+  # Subset data for the current ROI
+  subset_data <- CONN_LMM_long_old_combined %>% filter(ROI == roi)
+  
+  # Fit LME model for the current network
+  model_w_network <- lme(within ~ Btwn_cAge + With_cAge, 
+               random = ~ 1  | SubNum, 
+               method = "ML", 
+               data = subset_data)
+  
+  # Extract fixed effects (intercept and slope for With_cAge)
+  intercept <- fixef(model_w_network)["(Intercept)"]
+  slope <- fixef(model_w_network)["With_cAge"]
+  
+  # Store results in a list
+  network_fits[[roi]] <- data.frame(ROI = roi, Intercept = intercept, Slope = slope)
+}
+
+# Convert the list to a single dataframe
+network_fits_df <- bind_rows(network_fits)
+
+# View the results
+# print(network_fits_df)
+
+# Create Age Sequence
+age_seq <- seq(min(CONN_LMM_long_old_combined$Age), max(CONN_LMM_long_old_combined$Age), length.out = 100)
+
+# Generate Predictions for Each Network
+network_predictions <- network_fits_df %>%
+  rowwise() %>%
+  mutate(
+    predictions = list(
+      tibble(
+        Age = age_seq,
+        Within_Network_Connectivity = Intercept + Slope * (age_seq - 71.54), #age centered as the average age of older adults who completed both waves
+        ROI_Network = ROI  # Rename to avoid conflict
+      )
+    )
+  ) %>%
+  unnest(predictions)  # Expand the nested dataframe
+
+```
+
+```{r Model 2 fit within-network connectivity for all networks plot}
+# Generate predicted values for each network (from network_predictions_df)
+roi_order <- c("DMN", "SMN", "SAL", "DAN", "FP", "LAN", "VIS", "CRB", "Overall Mean")
+roi_colors <- c(brewer.pal(8, "Set2"), "#1f3c88")  # Set2 has 8 colors, adding black
+
+network_predictions$ROI <- factor(network_predictions$ROI, levels = roi_order)
+
+overall_p_value <- 0.0041  # The p-value from your model for Within_cAge
+
+# Create a data frame with just the "Overall Mean" p-value
+p_value_overall <- data.frame(
+  ROI = "Overall Mean",  
+  #x = max(CONN_LMM_long_old_combined$Age, na.rm = TRUE) - 2,  # Shift near right edge
+  #y = min(CONN_LMM_long_old_combined$within, na.rm = TRUE) - 0.01,  # Shift to bottom
+  p_label = sprintf("p = %.4f", overall_p_value)
+)
+
+age_seq <- seq(min(CONN_LMM_long_old_combined$Age), max(CONN_LMM_long_old_combined$Age), length.out = 100)
+
+slope_overall <-  fixef(model_w)["With_cAge"]
+intercept_overall <- fixef(model_w)["(Intercept)"]
+
+mle_predicted <- data.frame(
+  Age = age_seq,  # Use actual Age, not centered
+  within = intercept_overall + slope_overall * (age_seq - 71.54),  # Adjust for centering
+  ROI = "Overall Mean"
+)
+
+# Ensure the factor levels are applied correctly in all relevant dataframes
+CONN_LMM_long_old_combined$ROI <- factor(CONN_LMM_long_old_combined$ROI, levels = roi_order)
+network_predictions$ROI <- factor(network_predictions$ROI, levels = roi_order)
+mle_predicted$ROI <- factor(mle_predicted$ROI, levels = roi_order)
+p_value_overall$ROI <- factor(p_value_overall$ROI, levels = roi_order)
+
+# Plot using Set2 color palette
+p <- ggplot(CONN_LMM_long_old_combined, aes(x = Age, y = within, group = SubNum, color = ROI)) +
+  geom_point(size = 2) +  # Slightly larger points for visibility
+  geom_line(alpha = 0.6) +
+
+  # Add regression lines for each network, now colored by ROI
+  geom_line(data = network_predictions, 
+            aes(x = Age, y = Within_Network_Connectivity, color = ROI, group = ROI), 
+            inherit.aes = FALSE, size = 1.2) +  # Match colors to networks
+  
+  # Add the overall MLE regression line in red
+  geom_line(data = mle_predicted, aes(x = Age, y = within), 
+            inherit.aes = FALSE, color = "red", size = 1.2) +
+  
+  facet_wrap(~ROI, scales = "free_y", ncol = 3, drop = FALSE) +  
+  scale_color_manual(values = roi_colors) +  # Use Set2 color palette
+  theme_minimal(base_size = 12) +  # Increase base font size
+  labs(x = "Age", y = "Within-network Connectivity") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold", family = "Times New Roman"),  # Center title
+    plot.title.position = "plot",
+    axis.title.x = element_text(size = 14, face = "bold", family = "Times New Roman"),  # Bigger x-axis title
+    axis.title.y = element_text(size = 14, face = "bold", family = "Times New Roman"),  # Bigger y-axis title
+    axis.text = element_text(size = 10),  # Bigger tick labels
+    strip.text = element_text(size = 12, face = "bold", family = "Times New Roman"),  
+    legend.position = "none"  
+  ) + 
+  # Add p-value annotation for Overall Mean
+  geom_text(data = p_value_overall, 
+          aes(x = max(CONN_LMM_long_old_combined$Age) - 5,  # Move it further right
+              y = min(CONN_LMM_long_old_combined$within, na.rm = TRUE) + 0.55,  # Move it below the lowest point
+              label = p_label), 
+          inherit.aes = FALSE, size = 4, family = "Times New Roman", fontface = "italic", color = "red")
+
+# --- Compute SAL p-value from the longitudinal model and annotate it ---
+sal_dat <- CONN_LMM_long_old_combined %>% dplyr::filter(ROI == "SAL")
+
+# Mirror your per-network longitudinal spec
+m_sal <- nlme::lme(within ~ Btwn_cAge + With_cAge,
+                   random = ~ 1 | SubNum,   # use SubNum if that's your column name
+                   method = "ML",
+                   data = sal_dat)
+
+p_sal   <- summary(m_sal)$tTable["With_cAge", "p-value"]
+lab_sal <- ifelse(p_sal < 1e-4, "p < .0001", sprintf("p = %.4f", p_sal))
+col_sal <- ifelse(p_sal < 0.05, "red", "black")
+
+# Anchor label inside the SAL facet (bottom-right) and add a little padding
+annot_sal <- data.frame(
+  ROI   = factor("SAL", levels = roi_order),
+  Age   = Inf,
+  within = -Inf,
+  label = lab_sal
+)
+
+p <- p +
+  geom_text(
+    data = annot_sal,
+    aes(x = Age, y = within, label = label),
+    inherit.aes = FALSE,
+    hjust = 1.02, vjust = -0.6,
+    size = 4, family = "Times New Roman",
+    fontface = "italic",
+    color = col_sal
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0.02, 0.02))) +
+  scale_y_continuous(expand = expansion(mult = c(0.06, 0.06)))
+
+
+fp_dat <- CONN_LMM_long_old_combined %>% dplyr::filter(ROI == "FP")
+
+m_fp <- nlme::lme(within ~ Btwn_cAge + With_cAge,
+                  random = ~ 1 | SubNum,
+                  method = "ML",
+                  data = fp_dat)
+
+p_fp   <- summary(m_fp)$tTable["With_cAge", "p-value"]
+lab_fp <- ifelse(p_fp < 1e-4, "p < .0001", sprintf("p = %.4f", p_fp))
+col_fp <- ifelse(p_fp < 0.05, "red", "black")
+
+annot_fp <- data.frame(
+  ROI    = factor("FP", levels = roi_order),
+  Age    = Inf,
+  within = -Inf,
+  label  = lab_fp
+)
+
+p <- p +
+  geom_text(
+    data = annot_fp,
+    aes(x = Age, y = within, label = label),
+    inherit.aes = FALSE,
+    hjust = 1.02, vjust = -0.6,
+    size = 4, family = "Times New Roman",
+    fontface = "italic",
+    color = col_fp
+  )
+
+
+ggsave("Figure_5_long_within_network_change.tiff", plot = p, width = 17.6, height = 13.5, units = "cm", dpi = 300)
+
+```
+
+```{r Model 2 - Between-network}
+# ```{r fit the lme for each network regarding between-network connectivity the plots}
+# List of unique ROIs (networks)
+roi_list <- c("DMN", "SMN", "SAL", "DAN", "FP", "LAN", "VIS", "CRB")
+
+# Initialize an empty list to store model results
+network_fits <- list()
+
+# Loop through each network and fit a separate LME model
+for (roi in roi_list) {
+  
+  # Subset data for the current ROI
+  subset_data <- CONN_LMM_long_old_combined %>% filter(ROI == roi)
+  
+  # Fit LME model for the current network
+  model_b_network <- lme(between ~ Btwn_cAge + With_cAge, 
+               random = ~ 1  | SubNum, 
+               method = "ML", 
+               data = subset_data)
+  
+  # Extract fixed effects (intercept and slope for With_cAge)
+  intercept_b_network <- fixef(model_b_network)["(Intercept)"]
+  slope_b_network <- fixef(model_b_network)["With_cAge"]
+  
+  # Store results in a list
+  network_fits[[roi]] <- data.frame(ROI = roi, Intercept_b_network = intercept_b_network, Slope_b_network = slope_b_network)
+}
+
+# Convert the list to a single dataframe
+network_fits_df <- bind_rows(network_fits)
+
+# View the results
+# print(network_fits_df)
+
+# Create Age Sequence
+age_seq <- seq(min(CONN_LMM_long_old_combined$Age), max(CONN_LMM_long_old_combined$Age), length.out = 100)
+
+# Generate Predictions for Each Network
+network_predictions_b_network <- network_fits_df %>%
+  rowwise() %>%
+  mutate(
+    predictions = list(
+      tibble(
+        Age = age_seq,
+        Between_Network_Connectivity = Intercept_b_network + Slope_b_network * (age_seq - 71.54),
+        ROI_Network = ROI  # Rename to avoid conflict
+      )
+    )
+  ) %>%
+  unnest(predictions)  # Expand the nested dataframe
+
+```
+
+
+```{r plot the Model 2 Between network connectivity for all the networks}
+# Step 1: Calculate the average between-network connectivity for each subject & age
+between_avg <- CONN_LMM_long_old %>%
+  group_by(SubNum, Age) %>%  # Group by Subject and Age
+  summarize(between = mean(between, na.rm = TRUE), .groups = "drop") %>%
+  mutate(ROI = "Overall Mean")  # Assign a label for overall mean
+
+# Step 2: Merge `between_avg` into the `Overall Mean` rows
+CONN_LMM_long_old_combined <- CONN_LMM_long_old_combined %>%
+  mutate(
+    between = ifelse(ROI == "Overall Mean", 
+                     between_avg$between[match(paste(SubNum, Age), 
+                                               paste(between_avg$SubNum, between_avg$Age))], 
+                     between)  # Keep original values for other ROIs
+  )
+
+
+```
+
+```{r plot the between network connectivity for all the networks}
+# Ensure ROI levels are correctly ordered
+network_predictions_b_network$ROI <- factor(network_predictions_b_network$ROI, levels = roi_order)
+
+# Set color scheme
+roi_order <- c("DMN", "SMN", "SAL", "DAN", "FP", "LAN", "VIS", "CRB", "Overall Mean")
+roi_colors <- c(brewer.pal(8, "Set2"), "#1f3c88")  # Set2 has 8 colors, adding black
+
+# Create p-value annotation for Overall Mean
+p_value_b_overall <- 0.1251
+p_value_b_overall <- data.frame(
+  ROI = "Overall Mean",  
+  p_label_b = sprintf("p = %.4f", p_value_b_overall)
+)
+
+mle_predicted_between <- data.frame(
+  Age = age_seq,  
+  between = fixef(model_b)["(Intercept)"] + fixef(model_b)["With_cAge"] * (age_seq - 71.54),  
+  ROI = "Overall Mean"
+)
+
+# Ensure the factor levels are applied correctly in all relevant dataframes
+CONN_LMM_long_old_combined$ROI <- factor(CONN_LMM_long_old_combined$ROI, levels = roi_order)
+network_predictions_b_network$ROI <- factor(network_predictions_b_network$ROI, levels = roi_order)
+mle_predicted_between$ROI <- factor(mle_predicted_between$ROI, levels = roi_order)
+p_value_b_overall$ROI <- factor(p_value_b_overall$ROI, levels = roi_order)
+
+# **📊 Plot for Between-Network Connectivity**
+between_network_plot <- ggplot(CONN_LMM_long_old_combined, aes(x = Age, y = between, group = SubNum, color = ROI)) +
+  geom_point(size = 2) +  # Slightly larger points for visibility
+  geom_line(alpha = 0.6) +  
+
+  # Regression lines for each network (colored)
+  geom_line(data = network_predictions_b_network, 
+            aes(x = Age, y = Between_Network_Connectivity, color = ROI, group = ROI), 
+            inherit.aes = FALSE, size = 1.2) +  
+
+  # Overall Mean regression line in **red**
+  geom_line(data = mle_predicted_between, aes(x = Age, y = between), 
+            inherit.aes = FALSE, color = "black", size = 1.2) +
+
+  # Facet by network
+  facet_wrap(~ROI, scales = "free_y", ncol = 3, drop = FALSE) +  
+  scale_color_manual(values = roi_colors) +  
+
+  # Improve theme
+  theme_minimal(base_size = 14) +  
+  labs(x = "Age", y = "Between-network Connectivity") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold", family = "Times New Roman"),  
+    axis.title.x = element_text(size = 14, face = "bold", family = "Times New Roman"),  
+    axis.title.y = element_text(size = 14, face = "bold", family = "Times New Roman"),  
+    axis.text = element_text(size = 10),  
+    strip.text = element_text(size = 12, face = "bold", family = "Times New Roman"),  
+    legend.position = "none"
+  ) +  
+
+  # P-value annotation for Overall Mean
+  geom_text(data = p_value_b_overall, 
+          aes(x = max(CONN_LMM_long_old_combined$Age) - 5,  
+              y = min(CONN_LMM_long_old_combined$between, na.rm = TRUE) + 0.4,  
+              label = p_label_b), 
+          inherit.aes = FALSE, size = 4, fontface = "italic", color = "black")
+
+ggsave("Fig.6_long_between_network_change.tiff", plot = between_network_plot, width = 17.6, height = 13.5, units = "cm", dpi = 300)
+```
+
+```{r Model 2 - Segregation}
+# List of unique ROIs (networks)
+roi_list <- c("DMN", "SMN", "SAL", "DAN", "FP", "LAN", "VIS", "CRB")
+
+# Initialize an empty list to store model results
+network_fits <- list()
+
+# Loop through each network and fit a separate LME model
+for (roi in roi_list) {
+  
+  # Subset data for the current ROI
+  subset_data <- CONN_LMM_long_old_combined %>% filter(ROI == roi)
+  
+  # Fit LME model for the current network
+  model_s_network <- lme(seg ~ Btwn_cAge + With_cAge, 
+               random = ~ 1  | SubNum, 
+               method = "ML", 
+               data = subset_data)
+  
+  # Extract fixed effects (intercept and slope for With_cAge)
+  intercept_s_network <- fixef(model_s_network)["(Intercept)"]
+  slope_s_network <- fixef(model_s_network)["With_cAge"]
+  
+  # Store results in a list
+  network_fits[[roi]] <- data.frame(ROI = roi, Intercept_s_network = intercept_s_network, Slope_s_network = slope_s_network)
+}
+
+# Convert the list to a single dataframe
+network_fits_df <- bind_rows(network_fits)
+
+# View the results
+# print(network_fits_df)
+
+# Create Age Sequence
+age_seq <- seq(min(CONN_LMM_long_old_combined$Age), max(CONN_LMM_long_old_combined$Age), length.out = 100)
+
+# Generate Predictions for Each Network
+network_predictions_s_network <- network_fits_df %>%
+  rowwise() %>%
+  mutate(
+    predictions = list(
+      tibble(
+        Age = age_seq,
+        Segregation = Intercept_s_network + Slope_s_network * (age_seq - 71.54),
+        ROI_Network = ROI  # Rename to avoid conflict
+      )
+    )
+  ) %>%
+  unnest(predictions)  # Expand the nested dataframe
+
+
+```
+
+```{r plot Model 2 seg for all the networks}
+# Step 1: Calculate the average between-network connectivity for each subject & age
+seg_avg <- CONN_LMM_long_old %>%
+  group_by(SubNum, Age) %>%  # Group by Subject and Age
+  summarize(seg = mean(seg, na.rm = TRUE), .groups = "drop") %>%
+  mutate(ROI = "Overall Mean")  # Assign a label for overall mean
+
+# Step 2: Merge `between_avg` into the `Overall Mean` rows
+CONN_LMM_long_old_combined <- CONN_LMM_long_old_combined %>%
+  mutate(
+    seg = ifelse(ROI == "Overall Mean", 
+                     seg_avg$seg[match(paste(SubNum, Age), 
+                                               paste(seg_avg$SubNum, seg_avg$Age))], 
+                     seg)  # Keep original values for other ROIs
+  )
+```
+
+```{r plot the between network connectivity for all the networks}
+# Ensure ROI levels are correctly ordered
+network_predictions_s_network$ROI <- factor(network_predictions_s_network$ROI, levels = roi_order)
+
+# Set color scheme
+roi_order <- c("DMN", "SMN", "SAL", "DAN", "FP", "LAN", "VIS", "CRB", "Overall Mean")
+roi_colors <- c(brewer.pal(8, "Set2"), "#1f3c88")  # Set2 has 8 colors, adding black
+
+# Create p-value annotation for Overall Mean
+p_value_s_overall <- 0.7490
+p_value_s_overall <- data.frame(
+  ROI = "Overall Mean",  
+  p_label_s = sprintf("p = %.4f", p_value_s_overall)
+)
+
+mle_predicted_seg <- data.frame(
+  Age = age_seq,  
+  seg = fixef(model_s)["(Intercept)"] + fixef(model_s)["With_cAge"] * (age_seq - 71.54),  
+  ROI = "Overall Mean"
+)
+
+# Ensure the factor levels are applied correctly in all relevant dataframes
+CONN_LMM_long_old_combined$ROI <- factor(CONN_LMM_long_old_combined$ROI, levels = roi_order)
+network_predictions_s_network$ROI <- factor(network_predictions_s_network$ROI, levels = roi_order)
+mle_predicted_seg$ROI <- factor(mle_predicted_seg$ROI, levels = roi_order)
+p_value_s_overall$ROI <- factor(p_value_s_overall$ROI, levels = roi_order)
+
+# ** Plot for Between-Network Connectivity**
+seg_plot <- ggplot(CONN_LMM_long_old_combined, aes(x = Age, y = seg, group = SubNum, color = ROI)) +
+  geom_point(size = 2) +  # Slightly larger points for visibility
+  geom_line(alpha = 0.6) +  
+
+  # Regression lines for each network (colored)
+  geom_line(data = network_predictions_s_network, 
+            aes(x = Age, y = Segregation, color = ROI, group = ROI), 
+            inherit.aes = FALSE, size = 1.2) +  
+
+  # Overall Mean regression line in **red**
+  geom_line(data = mle_predicted_seg, aes(x = Age, y = seg), 
+            inherit.aes = FALSE, color = "black", size = 1.2) +
+
+  # Facet by network
+  facet_wrap(~ROI, scales = "free_y", ncol = 3, drop = FALSE) +  
+  scale_color_manual(values = roi_colors) +  
+
+  # Improve theme
+  theme_minimal(base_size = 14) +  
+  labs(x = "Age", y = "Network Segregation") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold", family = "Times New Roman"),  
+    axis.title.x = element_text(size = 14, face = "bold", family = "Times New Roman"),  
+    axis.title.y = element_text(size = 14, face = "bold", family = "Times New Roman"),  
+    axis.text = element_text(size = 10),  
+    strip.text = element_text(size = 12, face = "bold", family = "Times New Roman"),  
+    legend.position = "none"
+  ) +  
+
+  # P-value annotation for Overall Mean
+  geom_text(data = p_value_s_overall, 
+          aes(x = max(CONN_LMM_long_old_combined$Age) - 5,  
+              y = min(CONN_LMM_long_old_combined$seg[CONN_LMM_long_old_combined$ROI == "Overall Mean"], na.rm = TRUE) + 0.1,  
+              label = p_label_s), 
+          inherit.aes = FALSE, size = 4, fontface = "italic", color = "black")
+
+ggsave("Fig7_segregation_change.tiff", plot = seg_plot, width = 17.6, height = 13.5, units = "cm", dpi = 300)
+
+
+```
+
+
+```{r DONT NEED THAT: cross-sectional age on Within-network connectivity}
+library(ggbreak) 
+
+# Fit the linear model for cross-sectional effect
+
+tt <- summary(model_w_cross)$tTable
+p_val <- tt["Btwn_cAge", "p-value"]
+p_label <- sprintf("p = %.4f", p_val)
+
+
+# p_val <- summary(model_w_cross)$coefficients$fixed["Btwn_cAge", "Pr(>|t|)"]
+# p_label <- sprintf("p = %.4f", p_val)
+
+# Generate predicted line
+age_seq <- seq(min(CONN_LMM_Y_W1$Age), max(CONN_LMM_Y_W1$Age), length.out = 1000)
+slope <- fixef(model_w_cross)["Btwn_cAge"]
+intercept <- fixef(model_w_cross)["(Intercept)"]
+
+predicted_df <- data.frame(
+  Age = age_seq,
+  within = intercept + slope * (age_seq - 65)  # Btwn_cAge is Age - 65
+)
+
+# Plot the data and regression line
+
+p  <- ggplot(CONN_LMM_Y_W1, aes(x = Age, y = within)) +
+  geom_point(alpha = 0.4, size = 1, color = "#6CB0D6") +  # Light blue points
+  geom_smooth(data = predicted_df, aes(x = Age, y = within), 
+              method = "loess", se = FALSE, color = "red", size = 1.1) +  # Smoothed red line
+  annotate("text", 
+           x = max(CONN_LMM_Y_W1$Age) - 5, 
+           y = min(CONN_LMM_Y_W1$within, na.rm = TRUE) + 0.1, 
+           label = sprintf("p = %.4f", p_val),
+           size = 5, fontface = "italic", color = "red", 
+           family = "Times New Roman") +  # P-value text
+  labs(
+    title = "Cross-Sectional Effect of Age on Within-Network Connectivity",
+    x = "Age",
+    y = "Within-network Connectivity"
+  ) +
+  theme_minimal(base_size = 14) +  
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold", family = "Times New Roman"),
+    axis.title.x = element_text(size = 12, face = "bold", family = "Times New Roman"),
+    axis.title.y = element_text(size = 12, face = "bold", family = "Times New Roman"),
+    axis.text = element_text(size = 12, family = "Times New Roman")
+  )
+
+ggsave("within_network_connectivity_cross_sectional.png", plot = p, width = 9, height = 6, dpi = 300)
+
+```
+
+
+```{r Model 1 - THIS WORK: within Now Plot the cross-sectional effect by network}
+library(dplyr)
+library(ggplot2)
+
+# Step 1: Filter the data
+CONN_LMM_Y_W1 <- CONN_LMM_long %>%
+  filter(Type %in% c("Young", "W1"))
+
+# Step 2: Rename and order ROI levels
+CONN_LMM_Y_W1$ROI <- ifelse(CONN_LMM_Y_W1$ROI == "global", "Overall Mean", CONN_LMM_Y_W1$ROI)
+
+CONN_LMM_Y_W1 <- CONN_LMM_Y_W1 %>%
+  mutate(ROI_ordered = factor(ROI, levels = c(
+    "DMN", "SMN", "SAL", "DAN", "FP", "LAN", "VIS", "CRB", "Overall Mean"
+  )))
+
+# Step 3: Global prediction using model_w_cross (assumes this model exists)
+age_seq <- seq(min(CONN_LMM_Y_W1$Age), max(CONN_LMM_Y_W1$Age), length.out = 100)
+Btwn_cAge_seq <- age_seq - 65
+
+pred_df_global <- data.frame(
+  Age = age_seq,
+  Btwn_cAge = Btwn_cAge_seq,
+  effect_DMN_global = 0,
+  effect_SMN_global = 0,
+  effect_SAL_global = 0,
+  effect_DAN_global = 0,
+  effect_FP_global = 0,
+  effect_LAN_global = 0,
+  effect_CRB_global = 0
+)
+
+coefs <- fixef(model_w_cross)
+slope <- coefs["Btwn_cAge"]
+intercept <- coefs["(Intercept)"]
+
+# Generate predicted within-network connectivity
+predicted_df <- data.frame(
+  Age = age_seq,
+  within = intercept + slope * (age_seq - 65)  # Centered on age 65
+)
+
+# Initialize list to store predictions per ROI
+pred_lines <- list()
+
+# Loop through each ROI
+for (roi in roi_list) {
+  # Subset data for the current ROI
+  subset_data <- CONN_LMM_Y_W1 %>% filter(ROI == roi)
+
+  # Check for sufficient data
+  if (nrow(subset_data) > 2) {
+    # Fit cross-sectional model
+    model <- lm(within ~ Btwn_cAge, data = subset_data)
+    
+    # Generate prediction frame
+    pred_df <- data.frame(
+      Age = age_seq,
+      Btwn_cAge = Btwn_cAge_seq
+    )
+    
+    # Predict
+    pred_df$fit_value <- predict(model, newdata = pred_df)
+    pred_df$ROI <- roi
+    
+    # Store
+    pred_lines[[roi]] <- pred_df
+  }
+}
+
+# Combine all into one dataframe
+pred_lines <- bind_rows(pred_lines)
+
+# Step 4: Combine with pred_lines
+pred_df_global <- predicted_df %>%
+  select(Age, within) %>%
+  rename(fit_value = within) %>%
+  mutate(ROI = "Overall Mean")
+
+# Combine all ROI-specific predictions
+pred_lines <- bind_rows(pred_lines) %>%
+  filter(ROI != "global") %>%    # If needed
+  select(Age, fit_value, ROI)    # Drop Btwn_cAge and keep only what's needed
+
+
+pred_lines_with_global <- rbind(pred_lines, pred_df_global)
+
+# Step 5: Extract p-value from model_w_cross
+tt <- summary(model_w_cross)$tTable
+p_val <- tt["Btwn_cAge", "p-value"]
+p_label <- sprintf("p = %.4f", p_val)
+
+
+# Step 5.5 adding the order: 
+
+CONN_LMM_Y_W1$ROI_ordered <- factor(CONN_LMM_Y_W1$ROI, levels = roi_order)
+pred_lines_with_global$ROI_ordered <- factor(pred_lines_with_global$ROI, levels = roi_order)
+
+# Step 6: Plot with p-value only on "Overall Mean"
+p <- ggplot(CONN_LMM_Y_W1, aes(x = Age, y = within, color = ROI)) +
+  geom_point(alpha = 0.4, size = 1) +
+  geom_line(data = pred_lines_with_global, aes(x = Age, y = fit_value, group = ROI), size = 1.1) +
+  facet_wrap(~ROI_ordered, scales = "free_y", ncol = 3) +
+  scale_color_manual(values = roi_colors) + 
+  # scale_color_manual(values = c(
+  # "DMN" = "#66c2a5",
+  # "SMN" = "#fc8d62",
+  # "SAL" = "#8da0cb",
+  # "DAN" = "#e78ac3",
+  # "FP"  = "#a6d854",
+  # "LAN" = "#ffd92f",
+  # "VIS" = "#e5c494",
+  # "CRB" = "#b3b3b3",
+  # "Overall Mean" = "red")) + 
+  theme_minimal(base_size = 13) +
+  labs(
+    x = "Age", 
+    y = "Within-Network Connectivity") +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16, family = "Times New Roman"),
+    axis.title = element_text(face = "bold", size = 14, family = "Times New Roman"),
+    axis.text = element_text(size = 10),
+    strip.text = element_text(size = 12, face = "bold", family = "Times New Roman"),
+    legend.position = "none"
+  ) +
+  geom_text(
+  data = data.frame(
+    ROI_ordered = factor("Overall Mean", levels = roi_order), 
+    Age = 70,  # Adjusted x-position
+    within = 0.3,  # Adjusted y-position
+    label = p_label
+  ),
+  aes(x = Age, y = within, label = label),
+  inherit.aes = FALSE,
+  size = 4,
+  family = "Times New Roman",
+  color = "black",
+  fontface = "italic"
+)
+
+# Adding FP network significant results 
+# Compute FP p-value (cross-sectional: within ~ Btwn_cAge)
+fp_dat <- CONN_LMM_Y_W1 %>% filter(ROI == "FP")
+m_fp   <- lm(within ~ Btwn_cAge, data = fp_dat)
+
+p_fp   <- summary(m_fp)$coefficients["Btwn_cAge", "Pr(>|t|)"]
+lab_fp <- ifelse(p_fp < 1e-4, "p < .0001", sprintf("p = %.4f", p_fp))
+
+# Place the label nicely inside the FP panel
+x_pos <- max(fp_dat$Age, na.rm = TRUE) - 0.05 * diff(range(fp_dat$Age, na.rm = TRUE))
+y_pos <- min(fp_dat$within, na.rm = TRUE) + 0.10 * diff(range(fp_dat$within, na.rm = TRUE))
+
+annot_fp <- data.frame(
+  ROI_ordered = factor("FP", levels = roi_order),
+  Age   = Inf,      # right edge of the FP panel
+  within = -Inf,    # bottom edge of the FP panel
+  label = lab_fp
+)
+
+p <- p +
+  geom_text(
+    data = annot_fp,
+    aes(x = Age, y = within, label = label),
+    inherit.aes = FALSE,
+    hjust = 1.02,    # nudge left from the right edge
+    vjust = -0.6,    # nudge up from the bottom edge
+    size = 4,
+    family = "Times New Roman",
+    fontface = "italic",
+    color = "red"
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0.02, 0.02))) +
+  scale_y_continuous(expand = expansion(mult = c(0.06, 0.06)))
+
+
+ggsave("Fig.2_within_network_connectivity_cross_sectional.tiff", plot = p, width = 17.6, height = 13.5, units = "cm", dpi = 300)
+
+```
+
+```{r Modle 2 = plot cross-sectional age effect on between-network connectivity}
+library(dplyr)
+library(ggplot2)
+
+# Step 1: Filter the data
+CONN_LMM_Y_W1 <- CONN_LMM_long %>%
+  filter(Type %in% c("Young", "W1"))
+
+# Step 2: Rename and order ROI levels
+CONN_LMM_Y_W1$ROI <- ifelse(CONN_LMM_Y_W1$ROI == "global", "Overall Mean", CONN_LMM_Y_W1$ROI)
+
+CONN_LMM_Y_W1 <- CONN_LMM_Y_W1 %>%
+  mutate(ROI_ordered = factor(ROI, levels = c(
+    "DMN", "SMN", "SAL", "DAN", "FP", "LAN", "VIS", "CRB", "Overall Mean"
+  )))
+
+# Step 3: Global prediction using model_w_cross (assumes this model exists)
+age_seq <- seq(min(CONN_LMM_Y_W1$Age), max(CONN_LMM_Y_W1$Age), length.out = 100)
+Btwn_cAge_seq <- age_seq - 65
+
+pred_df_global <- data.frame(
+  Age = age_seq,
+  Btwn_cAge = Btwn_cAge_seq,
+  effect_VIS_global = 0,
+  effect_SMN_global = 0,
+  effect_SAL_global = 0,
+  effect_DAN_global = 0,
+  effect_FP_global = 0,
+  effect_LAN_global = 0,
+  effect_CRB_global = 0
+)
+
+coefs <- fixef(model_b_cross)
+slope <- coefs["Btwn_cAge"]
+intercept <- coefs["(Intercept)"]
+
+# Generate predicted within-network connectivity
+predicted_df <- data.frame(
+  Age = age_seq,
+  between = intercept + slope * (age_seq - 65)  # Centered on age 65
+)
+
+# Initialize list to store predictions per ROI
+pred_lines <- list()
+
+# Loop through each ROI
+for (roi in roi_list) {
+  # Subset data for the current ROI
+  subset_data <- CONN_LMM_Y_W1 %>% filter(ROI == roi)
+
+  # Check for sufficient data
+  if (nrow(subset_data) > 2) {
+    # Fit cross-sectional model
+    model <- lm(between ~ Btwn_cAge, data = subset_data)
+    
+    # Generate prediction frame
+    pred_df <- data.frame(
+      Age = age_seq,
+      Btwn_cAge = Btwn_cAge_seq
+    )
+    
+    # Predict
+    pred_df$fit_value <- predict(model, newdata = pred_df)
+    pred_df$ROI <- roi
+    
+    # Store
+    pred_lines[[roi]] <- pred_df
+  }
+}
+
+# Combine all into one dataframe
+pred_lines <- bind_rows(pred_lines)
+
+# Step 4: Combine with pred_lines
+pred_df_global <- predicted_df %>%
+  select(Age, between) %>%
+  rename(fit_value = between) %>%
+  mutate(ROI = "Overall Mean")
+
+# Combine all ROI-specific predictions
+pred_lines <- bind_rows(pred_lines) %>%
+  filter(ROI != "global") %>%    # If needed
+  select(Age, fit_value, ROI)    # Drop Btwn_cAge and keep only what's needed
+
+
+pred_lines_with_global <- rbind(pred_lines, pred_df_global)
+
+# Step 5: Extract p-value from model_w_cross
+tt <- summary(model_b_cross_int)$tTable
+p_val <- tt["Btwn_cAge", "p-value"]
+p_label <- sprintf("p = %.4f", p_val)
+
+# Step 5.5 adding the order: 
+
+CONN_LMM_Y_W1$ROI_ordered <- factor(CONN_LMM_Y_W1$ROI, levels = roi_order)
+pred_lines_with_global$ROI_ordered <- factor(pred_lines_with_global$ROI, levels = roi_order)
+
+# Step 6: Plot with p-value only on "Overall Mean"
+p <- ggplot(CONN_LMM_Y_W1, aes(x = Age, y = between, color = ROI)) +
+  geom_point(alpha = 0.4, size = 1) +
+  geom_line(data = pred_lines_with_global, aes(x = Age, y = fit_value, group = ROI), size = 1.1) +
+  facet_wrap(~ROI_ordered, scales = "free_y", ncol = 3) +
+  scale_color_manual(values = roi_colors) + 
+  # scale_color_manual(values = c(
+  # "DMN" = "#66c2a5",
+  # "SMN" = "#fc8d62",
+  # "SAL" = "#8da0cb",
+  # "DAN" = "#e78ac3",
+  # "FP"  = "#a6d854",
+  # "LAN" = "#ffd92f",
+  # "VIS" = "#e5c494",
+  # "CRB" = "#b3b3b3",
+  # "Overall Mean" = "red")) + 
+  theme_minimal(base_size = 13) +
+  labs(
+    x = "Age", 
+    y = "Between-Network Connectivity") +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16, family = "Times New Roman"),
+    axis.title = element_text(face = "bold", size = 14, family = "Times New Roman"),
+    axis.text = element_text(size = 10),
+    strip.text = element_text(size = 12, face = "bold", family = "Times New Roman"),
+    legend.position = "none"
+  ) +
+  geom_text(
+  data = data.frame(
+    ROI_ordered = factor("Overall Mean", levels = roi_order), 
+    Age = 70,  # Adjusted x-position
+    between = 0.135,  # Adjusted y-position
+    label = p_label
+  ),
+  aes(x = Age, y = between, label = label),
+  inherit.aes = FALSE,
+  size = 4,
+  family = "Times New Roman",
+  fontface = "italic",
+  # color = "red"
+)
+
+ggsave("Figure3_Between_network_connectivity_cross_sectional.tiff", plot = p, width = 17.6, height = 13.5, units = "cm", dpi = 300)
+
+```
+
+```{r Model 2 = Cross-sectional effect of age on network segregation}
+library(dplyr)
+library(ggplot2)
+
+# Step 1: Filter the data
+CONN_LMM_Y_W1 <- CONN_LMM_long %>%
+  filter(Type %in% c("Young", "W1"))
+
+# Step 2: Rename and order ROI levels
+CONN_LMM_Y_W1$ROI <- ifelse(CONN_LMM_Y_W1$ROI == "global", "Overall Mean", CONN_LMM_Y_W1$ROI)
+
+CONN_LMM_Y_W1 <- CONN_LMM_Y_W1 %>%
+  mutate(ROI_ordered = factor(ROI, levels = c(
+    "DMN", "SMN", "SAL", "DAN", "FP", "LAN", "VIS", "CRB", "Overall Mean"
+  )))
+
+# Step 3: Global prediction using model_w_cross (assumes this model exists)
+age_seq <- seq(min(CONN_LMM_Y_W1$Age), max(CONN_LMM_Y_W1$Age), length.out = 100)
+Btwn_cAge_seq <- age_seq - 65
+
+pred_df_global <- data.frame(
+  Age = age_seq,
+  Btwn_cAge = Btwn_cAge_seq,
+  effect_VIS_global = 0,
+  effect_SMN_global = 0,
+  effect_SAL_global = 0,
+  effect_DAN_global = 0,
+  effect_FP_global = 0,
+  effect_LAN_global = 0,
+  effect_CRB_global = 0
+)
+
+coefs <- fixef(model_s_cross_int)
+slope <- coefs["Btwn_cAge"]
+intercept <- coefs["(Intercept)"]
+
+# Generate predicted within-network connectivity
+predicted_df <- data.frame(
+  Age = age_seq,
+  seg = intercept + slope * (age_seq - 65)  # Centered on age 65
+)
+
+# Initialize list to store predictions per ROI
+pred_lines <- list()
+
+# Loop through each ROI
+for (roi in roi_list) {
+  # Subset data for the current ROI
+  subset_data <- CONN_LMM_Y_W1 %>% filter(ROI == roi)
+
+  # Check for sufficient data
+  if (nrow(subset_data) > 2) {
+    # Fit cross-sectional model
+    model <- lm(seg ~ Btwn_cAge, data = subset_data)
+    
+    # Generate prediction frame
+    pred_df <- data.frame(
+      Age = age_seq,
+      Btwn_cAge = Btwn_cAge_seq
+    )
+    
+    # Predict
+    pred_df$fit_value <- predict(model, newdata = pred_df)
+    pred_df$ROI <- roi
+    
+    # Store
+    pred_lines[[roi]] <- pred_df
+  }
+}
+
+# Combine all into one dataframe
+pred_lines <- bind_rows(pred_lines)
+
+# Step 4: Combine with pred_lines
+pred_df_global <- predicted_df %>%
+  select(Age, seg) %>%
+  rename(fit_value = seg) %>%
+  mutate(ROI = "Overall Mean")
+
+# Combine all ROI-specific predictions
+pred_lines <- bind_rows(pred_lines) %>%
+  filter(ROI != "global") %>%    # If needed
+  select(Age, fit_value, ROI)    # Drop Btwn_cAge and keep only what's needed
+
+
+pred_lines_with_global <- rbind(pred_lines, pred_df_global)
+
+# Step 5: Extract p-value from model_w_cross
+tt <- summary(model_s_cross_int)$tTable
+p_val <- tt["Btwn_cAge", "p-value"]
+p_label <- sprintf("p = %.4f", p_val)
+
+# Step 5.5 adding the order: 
+
+CONN_LMM_Y_W1$ROI_ordered <- factor(CONN_LMM_Y_W1$ROI, levels = roi_order)
+pred_lines_with_global$ROI_ordered <- factor(pred_lines_with_global$ROI, levels = roi_order)
+
+# Step 6: Plot with p-value only on "Overall Mean"
+p <- ggplot(CONN_LMM_Y_W1, aes(x = Age, y = seg, color = ROI)) +
+  geom_point(alpha = 0.4, size = 1) +
+  geom_line(data = pred_lines_with_global, aes(x = Age, y = fit_value, group = ROI), size = 1.1) +
+  facet_wrap(~ROI_ordered, scales = "free_y", ncol = 3) +
+  scale_color_manual(values = roi_colors) + 
+  # scale_color_manual(values = c(
+  # "DMN" = "#66c2a5",
+  # "SMN" = "#fc8d62",
+  # "SAL" = "#8da0cb",
+  # "DAN" = "#e78ac3",
+  # "FP"  = "#a6d854",
+  # "LAN" = "#ffd92f",
+  # "VIS" = "#e5c494",
+  # "CRB" = "#b3b3b3",
+  # "Overall Mean" = "red")) + 
+  theme_minimal(base_size = 13) +
+  labs(
+    x = "Age", 
+    y = "Network Segregation") +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16, family = "Times New Roman"),
+    axis.title = element_text(face = "bold", size = 14, family = "Times New Roman"),
+    axis.text = element_text(size = 10),
+    strip.text = element_text(size = 12, face = "bold", family = "Times New Roman"),
+    legend.position = "none"
+  ) +
+  geom_text(
+  data = data.frame(
+    ROI_ordered = factor("Overall Mean", levels = roi_order), 
+    Age = 70,  # Adjusted x-position
+    seg = 0.7,  # Adjusted y-position
+    label = p_label
+  ),
+  aes(x = Age, y = seg, label = label),
+  inherit.aes = FALSE,
+  size = 4,
+  family = "Times New Roman",
+  fontface = "italic",
+  # color = "red"
+)
+
+# ---- Add SAL p-value to the SAL panel ----
+sal_dat <- CONN_LMM_Y_W1 %>% dplyr::filter(ROI == "SAL")
+m_sal   <- lm(seg ~ Btwn_cAge, data = sal_dat)
+
+p_sal   <- summary(m_sal)$coefficients["Btwn_cAge", "Pr(>|t|)"]
+lab_sal <- ifelse(p_sal < 1e-4, "p < .0001", sprintf("p = %.4f", p_sal))
+col_sal <- ifelse(p_sal < 0.05, "red", "black")  # highlight if significant
+
+annot_sal <- data.frame(
+  ROI_ordered = factor("SAL", levels = roi_order),
+  Age   = Inf,     # anchor to right edge of SAL panel
+  seg   = -Inf,    # anchor to bottom edge
+  label = lab_sal
+)
+
+p <- p +
+  geom_text(
+    data = annot_sal,
+    aes(x = Age, y = seg, label = label),
+    inherit.aes = FALSE,
+    hjust = 1.02,      # nudge left from right edge
+    vjust = -0.6,      # nudge up from bottom
+    size = 4,
+    family = "Times New Roman",
+    fontface = "italic",
+    color = col_sal
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0.02, 0.02))) +
+  scale_y_continuous(expand = expansion(mult = c(0.06, 0.06)))
+
+
+ggsave("Fig4_Network_segregation_cross_sectional.tiff", plot = p, width = 17.6, height = 13.5, units = "cm", dpi = 300)
+```
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
