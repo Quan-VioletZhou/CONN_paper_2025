@@ -4,8 +4,7 @@ Code for the manuscript **"Age-related Changes in Brain Connectivity: Cross-sect
 (*Imaging Neuroscience*, IMAG-26-0103).
 
 The pipeline takes resting-state fMRI data through preprocessing in MATLAB
-(CONN toolbox), first-level ROI extraction in Python (nilearn + Schaefer-300
-+ Buckner-7 atlas), and statistical modelling in R (linear mixed-effects).
+(CONN toolbox), first-level ROI extraction in Python (nilearn + Schaefer-300 & Buckner-7 atlas), and statistical modelling in R (linear mixed-effects).
 
 ---
 
